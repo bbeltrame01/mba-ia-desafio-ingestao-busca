@@ -1,40 +1,18 @@
-import os
-from dotenv import load_dotenv
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_postgres import PGVector
 from langchain_core.prompts import PromptTemplate
-from langchain_core.runnables import RunnablePassthrough
-import psycopg
+from langchain_core.runnables import RunnableLambda, RunnablePassthrough
 
-load_dotenv()
+from db import (
+    DATABASE_URL,
+    EMBEDDING_MODEL,
+    LLM_MODEL,
+    OPENAI_API_KEY,
+    PG_VECTOR_COLLECTION_NAME,
+    validate_vector_extension,
+)
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@127.0.0.1:5435/rag")
-PG_VECTOR_COLLECTION_NAME = os.getenv("PG_VECTOR_COLLECTION_NAME", "documents")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-
-def validate_vector_extension():
-    """
-    Verifica se a extensão vector está criada no PostgreSQL.
-    Lança uma exceção clara se a extensão não existir.
-    """
-    try:
-        conn = psycopg.connect(DATABASE_URL)
-        with conn.cursor() as cur:
-            cur.execute("SELECT extname FROM pg_extension WHERE extname = 'vector'")
-            result = cur.fetchone()
-            if not result:
-                raise RuntimeError(
-                    "Extensao 'vector' nao encontrada no PostgreSQL. "
-                    "Execute 'docker-compose down && docker-compose up -d' para recriar os containers."
-                )
-        conn.close()
-    except psycopg.OperationalError as e:
-        raise ConnectionError(
-            f"Nao conseguiu conectar ao PostgreSQL em {DATABASE_URL}. "
-            f"Verifique se os containers estao rodando: {e}"
-        )
-    except Exception as e:
-        raise Exception(f"Erro ao validar extensao vector: {e}")
+TOP_K = 10
 
 PROMPT_TEMPLATE = """
 CONTEXTO:
@@ -69,7 +47,7 @@ def create_rag_chain():
 
     # Initialize embeddings
     embeddings = OpenAIEmbeddings(
-        model="text-embedding-3-small",
+        model=EMBEDDING_MODEL,
         openai_api_key=OPENAI_API_KEY
     )
 
@@ -81,35 +59,40 @@ def create_rag_chain():
         use_jsonb=True
     )
 
-    # Create retriever
-    retriever = vector_store.as_retriever(search_kwargs={"k": 10})
+    # Vectorize the question and fetch the k most relevant chunks
+    def retrieve(question):
+        return vector_store.similarity_search_with_score(question, k=TOP_K)
 
     # Create prompt
     prompt = PromptTemplate.from_template(PROMPT_TEMPLATE)
 
-    # Create LLM
+    # Create LLM (gpt-5 models only accept the default temperature)
     llm = ChatOpenAI(
-        model="gpt-3.5-turbo",
-        openai_api_key=OPENAI_API_KEY,
-        temperature=0
+        model=LLM_MODEL,
+        openai_api_key=OPENAI_API_KEY
     )
 
     # Create chain
-    def format_docs(docs):
-        return "\n\n".join(doc.page_content for doc in docs)
+    def format_docs(results):
+        return "\n\n".join(doc.page_content for doc, _score in results)
 
     chain = (
-        {"contexto": retriever | format_docs, "pergunta": RunnablePassthrough()}
+        {"contexto": RunnableLambda(retrieve) | format_docs, "pergunta": RunnablePassthrough()}
         | prompt
         | llm
     )
 
     return chain
 
-def search_and_answer(question):
-    # Validate vector extension before proceeding
+def build_answerer():
+    """Valida o banco e monta a cadeia uma vez; devolve uma função pergunta -> resposta."""
     validate_vector_extension()
-    
     chain = create_rag_chain()
-    response = chain.invoke(question)
-    return response.content
+
+    def answer(question):
+        return chain.invoke(question).content
+
+    return answer
+
+def search_and_answer(question):
+    return build_answerer()(question)

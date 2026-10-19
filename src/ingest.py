@@ -1,40 +1,32 @@
 import os
-from dotenv import load_dotenv
+import uuid
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings
 from langchain_postgres import PGVector
-import psycopg
 
-load_dotenv()
+from db import (
+    DATABASE_URL,
+    EMBEDDING_MODEL,
+    OPENAI_API_KEY,
+    PG_VECTOR_COLLECTION_NAME,
+    validate_vector_extension,
+)
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@127.0.0.1:5435/rag")
-PG_VECTOR_COLLECTION_NAME = os.getenv("PG_VECTOR_COLLECTION_NAME", "documents")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+DEFAULT_PDF = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "document.pdf")
 
-def validate_vector_extension():
+
+def chunk_ids(pdf_file, chunks):
     """
-    Verifica se a extensao vector esta criada no PostgreSQL.
-    Lanca uma excecao clara se a extensao nao existir.
+    IDs determinísticos por arquivo e posição do chunk: reingerir o mesmo PDF
+    sobrescreve os registros (upsert) em vez de duplicá-los.
     """
-    try:
-        conn = psycopg.connect(DATABASE_URL)
-        with conn.cursor() as cur:
-            cur.execute("SELECT extname FROM pg_extension WHERE extname = 'vector'")
-            result = cur.fetchone()
-            if not result:
-                raise RuntimeError(
-                    "Extensao 'vector' nao encontrada no PostgreSQL. "
-                    "Execute 'docker-compose down && docker-compose up -d' para recriar os containers."
-                )
-        conn.close()
-    except psycopg.OperationalError as e:
-        raise ConnectionError(
-            f"Nao conseguiu conectar ao PostgreSQL em {DATABASE_URL}. "
-            f"Verifique se os containers estao rodando: {e}"
-        )
-    except Exception as e:
-        raise Exception(f"Erro ao validar extensao vector: {e}")
+    source = os.path.abspath(pdf_file)
+    return [
+        str(uuid.uuid5(uuid.NAMESPACE_URL, f"{source}#{chunk.metadata.get('page')}#{i}"))
+        for i, chunk in enumerate(chunks)
+    ]
+
 
 def ingest_pdf(pdf_path=None):
     if not OPENAI_API_KEY:
@@ -44,8 +36,8 @@ def ingest_pdf(pdf_path=None):
     validate_vector_extension()
 
     # Use provided pdf_path or fall back to env variable
-    pdf_file = pdf_path or os.getenv("PDF_PATH", "document.pdf")
-    
+    pdf_file = pdf_path or os.getenv("PDF_PATH") or DEFAULT_PDF
+
     # Validate PDF exists
     if not os.path.exists(pdf_file):
         raise FileNotFoundError(f"PDF file not found: {pdf_file}")
@@ -64,14 +56,15 @@ def ingest_pdf(pdf_path=None):
 
     # Generate embeddings
     embeddings = OpenAIEmbeddings(
-        model="text-embedding-3-small",
+        model=EMBEDDING_MODEL,
         openai_api_key=OPENAI_API_KEY
     )
 
     # Store in PGVector
-    vector_store = PGVector.from_documents(
+    PGVector.from_documents(
         documents=chunks,
         embedding=embeddings,
+        ids=chunk_ids(pdf_file, chunks),
         connection=DATABASE_URL,
         collection_name=PG_VECTOR_COLLECTION_NAME,
         use_jsonb=True

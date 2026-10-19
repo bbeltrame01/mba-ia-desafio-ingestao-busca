@@ -30,37 +30,42 @@ Este projeto implementa um sistema de Retrieval-Augmented Generation (RAG) para 
    OPENAI_API_KEY=your_openai_api_key_here
    DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5435/rag
    PG_VECTOR_COLLECTION_NAME=documents
-   PDF_PATH=./pdfs/document.pdf
+   PDF_PATH=./document.pdf
+   OPENAI_LLM_MODEL=gpt-5-nano   # opcional
    ```
 
 4. Inicie o banco de dados PostgreSQL com pgVector:
    ```bash
-   docker-compose up -d
+   docker compose up -d
    ```
 
 5. Aguarde o banco estar pronto (cerca de 30 segundos). A extensão pgVector será criada automaticamente.
 
 ## Uso
 
-### Ingestão de PDF
-
-Para ingerir um PDF no sistema:
+### Ordem de execução (Desafio)
 
 ```bash
-python main.py ingest ./pdfs/
+docker compose up -d
+python src/ingest.py
+python src/chat.py
 ```
 
-Substitua `./pdfs/` pelo diretório contendo os arquivos PDF. O sistema processará todos os PDFs no diretório, dividindo-os em chunks, gerando embeddings e armazenando no banco vetorial.
+`src/ingest.py` ingere o `document.pdf` da raiz (ou o `PDF_PATH` do `.env`). Reexecutar a ingestão sobrescreve os chunks do mesmo PDF em vez de duplicá-los.
 
-### Consulta via CLI
+`src/chat.py` abre um chat no terminal: digite as perguntas e `sair` (ou Ctrl+D / Ctrl+Z) para encerrar.
 
-Para fazer uma pergunta sobre o conteúdo dos PDFs ingeridos:
+### CLI alternativa (`main.py`)
 
 ```bash
+python main.py ingest                 # PDF_PATH do .env
+python main.py ingest ./document.pdf  # um arquivo
+python main.py ingest ./meus-pdfs/    # todos os PDFs de um diretório
 python main.py ask "Qual o faturamento da Empresa SuperTechIABrazil?"
+python main.py chat                   # mesmo chat do src/chat.py
 ```
 
-O sistema retornará uma resposta baseada exclusivamente no conteúdo dos documentos.
+Os comandos terminam com código de saída diferente de zero quando a ingestão ou a busca falham.
 
 ### Exemplo de saída:
 
@@ -84,8 +89,8 @@ O sistema segue o fluxo RAG clássico:
 2. **Texto** → Chunking (RecursiveCharacterTextSplitter, chunk_size=1000, overlap=150)
 3. **Chunks** → Embeddings (OpenAI text-embedding-3-small)
 4. **Vetores** → PostgreSQL + pgVector (porta 5435)
-5. **Busca** → Similarity Search (top-k=10)
-6. **Contexto** → LLM (GPT-3.5-turbo) com prompt específico
+5. **Busca** → `similarity_search_with_score` (k=10)
+6. **Contexto** → LLM (gpt-5-nano) com o prompt do desafio
 7. **Resposta** → CLI
 
 ## Melhorias Implementadas
@@ -103,12 +108,14 @@ O sistema segue o fluxo RAG clássico:
 ├── requirements.txt            # Dependências Python
 ├── .env.example                # Template das variáveis de ambiente
 ├── main.py                     # CLI principal
-├── document.pdf                # PDF de exemplo para ingestão
+├── document.pdf                # PDF para ingestão
+├── tests/                      # Testes pytest de conformidade
 ├── docs/                       # Documentação do desenvolvimento
 ├── src/
+│   ├── db.py                   # Configuração e validação do pgVector
 │   ├── ingest.py               # Script de ingestão do PDF
 │   ├── search.py               # Lógica de busca e RAG
-│   └── chat.py                 # CLI alternativo (não usado no main)
+│   └── chat.py                 # Chat interativo no terminal
 └── README.md                   # Este arquivo
 ```
 
@@ -130,9 +137,18 @@ O sistema foi desenvolvido seguindo boas práticas de engenharia de software:
 - Comentários explicativos
 - Estrutura escalável
 
+## Testes
+
+Os testes não acessam OpenAI nem PostgreSQL (clientes externos são substituídos por fakes):
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
 ## Troubleshooting
 
-- **Erro de conexão com o banco**: Verifique se o Docker Compose está rodando (`docker-compose ps`)
+- **Erro de conexão com o banco**: Verifique se o Docker Compose está rodando (`docker compose ps`)
 - **Chave da API inválida**: Verifique se `OPENAI_API_KEY` está correta no `.env`
 - **PDF não encontrado**: Certifique-se de que o arquivo PDF existe no caminho especificado
 - **Rate limit da OpenAI**: Aguarde alguns minutos e tente novamente
